@@ -6,6 +6,7 @@
 
 local t_insert = table.insert
 local t_sort = table.sort
+local t_concat = table.concat
 
 local ComparePowerReportListClass = newClass("ComparePowerReportListControl", "ListControl", function(self, anchor, rect)
 	self.ListControl(anchor, rect, 18, "VERTICAL", false)
@@ -107,6 +108,30 @@ function ComparePowerReportListClass:ReList()
 	for _, entry in ipairs(self.reportData) do
 		t_insert(self.list, entry)
 	end
+end
+
+function ComparePowerReportListClass:GetReportAsText()
+	if not self.reportData or #self.list == 0 then
+		return nil
+	end
+	-- Strip PoB color codes (^0-^9 and ^xRRGGBB) from a string.
+	local function strip(s)
+		return (s:gsub("%^x%x%x%x%x%x%x", ""):gsub("%^%d", ""))
+	end
+	local lines = {}
+	local headers = {}
+	for _, col in ipairs(self.colList) do
+		t_insert(headers, strip(col.label or ""))
+	end
+	t_insert(lines, t_concat(headers, "\t"))
+	for index, entry in ipairs(self.list) do
+		local row = {}
+		for col = 1, #self.colList do
+			t_insert(row, strip(self:GetRowValue(col, index, entry)))
+		end
+		t_insert(lines, t_concat(row, "\t"))
+	end
+	return t_concat(lines, "\r\n")
 end
 
 function ComparePowerReportListClass:AddValueTooltip(tooltip, index, entry)
