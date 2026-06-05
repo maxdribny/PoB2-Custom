@@ -1,3 +1,6 @@
+# Logs (written by Logger.lua to repo root)
+logs/
+
 # Development tools
 .idea/
 .vs/

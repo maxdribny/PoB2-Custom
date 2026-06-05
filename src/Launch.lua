@@ -18,6 +18,31 @@ jit.opt.start('maxtrace=4000','maxmcode=8192')
 collectgarbage("setpause", 400)
 
 function launch:OnInit()
+	-- Collect startup timing marks before the logger is available; imported later.
+	self._startupMarks = self._startupMarks or {}
+	local function startupMark(label)
+		if GetTime then
+			table.insert(self._startupMarks, { label = label, t = GetTime() })
+		end
+	end
+	startupMark("Launch:OnInit start")
+
+	-- Resolve a stable repo root so logs go to <repo-root>/logs regardless of CWD.
+	-- In dev installs, scripts live under <repo-root>/src, so strip a trailing /src.
+	do
+		local scriptPath = GetScriptPath and (GetScriptPath() or "") or ""
+		scriptPath = tostring(scriptPath):gsub("\\", "/"):gsub("/+$", "")
+		if scriptPath ~= "" then
+			if scriptPath:match("/src$") then
+				self.rootPath = scriptPath:gsub("/src$", "")
+			else
+				self.rootPath = scriptPath
+			end
+		else
+			self.rootPath = "."
+		end
+	end
+
 	self.devMode = false
 	self.installedMode = false
 	self.versionNumber = "?"
@@ -68,13 +93,17 @@ function launch:OnInit()
 	RenderInit("DPI_AWARE")
 	ConPrintf("Loading main script...")
 	local errMsg
+	startupMark("Before PLoadModule Modules/Main")
 	errMsg, self.main = PLoadModule("Modules/Main")
+	startupMark("After PLoadModule Modules/Main")
 	if errMsg then
 		self:ShowErrMsg("Error loading main script: %s", errMsg)
 	elseif not self.main then
 		self:ShowErrMsg("Error loading main script: no object returned")
 	elseif self.main.Init then
+		startupMark("Before main:Init")
 		errMsg = PCall(self.main.Init, self.main)
+		startupMark("After main:Init")
 		if errMsg then
 			self:ShowErrMsg("In 'Init': %s", errMsg)
 		end
