@@ -1,0 +1,2 @@
+# Keep the shell script LF so it runs correctly under Git Bash / WSL on Windows.
+*.sh text eol=lf
