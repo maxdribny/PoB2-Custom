@@ -1,3 +1,11 @@
+> [!NOTE]
+> **This is a personal custom copy of Path of Building 2.**
+> It is a standalone copy of [PathOfBuildingCommunity/PathOfBuilding-PoE2](https://github.com/PathOfBuildingCommunity/PathOfBuilding-PoE2)
+> — not a GitHub fork. Custom changes live on the `custom` branch; the `dev` branch is kept as a
+> clean mirror of the official `dev`. To pull in the latest upstream changes, run the sync script
+> (see [`sync/README.md`](sync/README.md)). All credit for the original project goes to the Path of
+> Building Community.
+
 # Path of Building 2 Community
 ## Welcome to Path of Building 2, an offline build planner for Path of Exile 2!
 
