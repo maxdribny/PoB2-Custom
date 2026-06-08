@@ -931,6 +931,42 @@ function TradeQueryClass:SortFetchResults(row_idx, mode)
 	return newTbl
 end
 
+-- Build a query that narrows a weighted search down to a single result by
+-- pinning the trade-sum weight to a tight band around the picked item.
+-- The site uses float weights but the API only exposes integers (e.g. a weight
+-- of 172.3 shows up as 172), hence the +/-1 band.
+-- When `trader` is given, the seller's account is added as an extra filter to
+-- make false positives extremely unlikely. This MUST only be used for an API
+-- POST body: account names contain a '#' discriminator (e.g. "name#0763"), and
+-- a '#' inside a prefill (?q=) URL is rejected by pathofexile.com's OAuth flow
+-- as a URL fragment when the browser is logged out.
+---@param lastQueryStr string the weighted query JSON used for the slot search
+---@param weight number the picked item's trade-sum weight
+---@param trader string? seller account name; omit for prefill URLs
+---@return string queryJson
+function TradeQueryClass:BuildWeightBandQuery(lastQueryStr, weight, trader)
+	local exactQuery = dkjson.decode(lastQueryStr)
+	exactQuery.query.stats[1].value = { min = floor(weight, 1) - 1, max = round(weight, 1) + 1 }
+	if trader then
+		exactQuery.query.filters = exactQuery.query.filters or { }
+		exactQuery.query.filters.trade_filters = exactQuery.query.filters.trade_filters or { filters = { } }
+		exactQuery.query.filters.trade_filters.filters = exactQuery.query.filters.trade_filters.filters or { }
+		exactQuery.query.filters.trade_filters.filters.account = { input = trader }
+	end
+	return dkjson.encode(exactQuery)
+end
+
+-- Build a prefill (?q=) trade search URL for the given query JSON. The base is
+-- routed through buildUrl so the realm/league are encoded correctly. Only pass
+-- a `#`-free query here (see BuildWeightBandQuery) so the resulting URL survives
+-- pathofexile.com's logged-out OAuth redirect.
+---@param queryStr string query JSON
+---@return string url
+function TradeQueryClass:BuildPrefillSearchUrl(queryStr)
+	local base = self.tradeQueryRequests:buildUrl(self.hostName .. "trade2/search", self.pbRealm, self.pbLeague)
+	return base .. "?q=" .. urlEncode(queryStr)
+end
+
 -- Method to generate pane elements for each item slot
 function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, row_vertical_padding, row_height)
 	local controls = self.controls
@@ -1164,24 +1200,41 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 			if  itemResult.whisper and (itemResult.priceType ~= "~b/o") then
 				Copy(itemResult.whisper)
 			else
-				local exactQuery = dkjson.decode(self.lastQueries[row_idx])
-				-- use trade sum to get the specific item. both min and max
-				-- weight on site uses floats but only shows integer in the api
-				-- e.g. weight of 172.3 shows up as 172 in the api
-				exactQuery.query.stats[1].value = { min = floor(itemResult.weight, 1) - 1, max = round(itemResult.weight, 1) + 1 }
-				-- also apply trader name. this should make false positives
-				-- extremely unlikely. this doesn't seem to take up a filter slot
-				exactQuery.query.filters = exactQuery.query.filters or { }
-				exactQuery.query.filters.trade_filters = exactQuery.query.filters.trade_filters or { filters = { } }
-				exactQuery.query.filters.trade_filters.filters = exactQuery.query.filters.trade_filters.filters or { }
-				exactQuery.query.filters.trade_filters.filters.account = { input = itemResult.trader }
+				-- Fallback: open a prefill (?q=) search without the account filter.
+				-- Account names contain a '#', and a logged-out browser forwards the
+				-- whole prefill URL to pathofexile.com's OAuth endpoint, which
+				-- rejects the '#' as a URL fragment. Dropping the account keeps the
+				-- URL '#'-free (less precise: relies on the weight band only).
+				local function openPrefillFallback()
+					local query = self:BuildWeightBandQuery(self.lastQueries[row_idx], itemResult.weight, nil)
+					local url = self:BuildPrefillSearchUrl(query)
+					Copy(url)
+					OpenURL(url)
+				end
 
-				local exactQueryStr = dkjson.encode(exactQuery)
-
-				local encodedUrl = s_format("https://www.pathofexile.com/trade2/search/%s?q=%s", self.pbLeague, urlEncode(exactQueryStr))
-
-				Copy(encodedUrl)
-				OpenURL(encodedUrl)
+				if main.api.authToken then
+					-- We hold a trade API token, so create a server-side search and
+					-- open the short trade2/search/<league>/<id> URL. It carries no
+					-- '#'/query string, so a logged-out browser completes the normal
+					-- OAuth login instead of erroring. The account filter is kept
+					-- here because it lives in the POST body, never in a URL.
+					self:SetNotice(self.controls.pbNotice, "Creating trade search...")
+					local exactQueryStr = self:BuildWeightBandQuery(self.lastQueries[row_idx], itemResult.weight, itemResult.trader)
+					self.tradeQueryRequests:PerformSearch(self.pbRealm, self.pbLeague, exactQueryStr, function(response, errMsg)
+						if errMsg or not (response and response.id) then
+							-- token expired, item already sold, etc. -> degrade gracefully
+							self:SetNotice(self.controls.pbNotice, "")
+							openPrefillFallback()
+							return
+						end
+						self:SetNotice(self.controls.pbNotice, "")
+						local url = self.tradeQueryRequests:buildUrl(self.hostName .. "trade2/search", self.pbRealm, self.pbLeague, response.id)
+						Copy(url)
+						OpenURL(url)
+					end)
+				else
+					openPrefillFallback()
+				end
 			end
 		end)
 
