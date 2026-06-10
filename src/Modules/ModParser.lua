@@ -244,6 +244,7 @@ local modNameList = {
 	["evasion rating and armour"] = "ArmourAndEvasion",
 	["armour and energy shield"] = "ArmourAndEnergyShield",
 	["evasion rating and energy shield"] = "EvasionAndEnergyShield",
+	["global evasion rating and energy shield"] = { "Evasion", "EnergyShield" },
 	["evasion and energy shield"] = "EvasionAndEnergyShield",
 	["armour, evasion and energy shield"] = "Defences",
 	["defences"] = "Defences",
@@ -2727,7 +2728,8 @@ local specialModList = {
 	["evasion rating from equipped body armour is halved"] = { mod("Evasion", "MORE", -50, { type = "SlotName", slotName = "Body Armour" }) },
 	-- Ascendant
 	["grants (%d+) passive skill points?"] = function(num) return { mod("ExtraPoints", "BASE", num) } end,
-	["can allocate passives from the %a+'s starting point"] = { },
+	["can allocate passives from the (%a+)'s starting point"] = function(_, className) return { mod("AlternateClassStart", "LIST", firstToUpper(className)) } end,
+	["can allocate passive skills from the (%a+)'s starting point"] = function(_, className) return { mod("AlternateClassStart", "LIST", firstToUpper(className)) } end,
 	["projectiles gain damage as they travel farther, dealing up to (%d+)%% increased damage with hits to targets"] = function(num) return { mod("Damage", "INC", num, nil, bor(ModFlag.Hit, ModFlag.Projectile), { type = "DistanceRamp", ramp = { {35,0},{70,1} } }) } end,
 	["(%d+)%% chance to gain elusive on kill"] = {
 		flag("Condition:CanBeElusive"),
@@ -3363,7 +3365,7 @@ local specialModList = {
 	["all flames of chayula that you manifest are red"] = { flag("BreachFlameOnlyRed") },
 	["all flames of chayula that you manifest are blue"] = { flag("BreachFlameOnlyBlue") },
 	["all flames of chayula that you manifest are purple"] = { flag("BreachFlameOnlyPurple") },
-	["mana leech recovers based on other damage types damage as well as physical damage"] = { -- legacy wording 
+	["mana leech recovers based on other damage types damage as well as physical damage"] = { -- legacy wording
 		flag("ManaLeechBasedOnElementalDamage"),
 		flag("ManaLeechBasedOnChaosDamage"),
 	},
@@ -3734,6 +3736,8 @@ local specialModList = {
 	["your critical hit chance is lucky while focus?sed"] = { flag("CritChanceLucky", { type = "Condition", var = "Focused" }) },
 	["your critical hits do not deal extra damage"] = { flag("NoCritMultiplier") },
 	["critical hits do not deal extra damage"] = { flag("NoCritMultiplier") },
+	["you have no critical damage bonus"] = { flag("NoCritMultiplier") },
+	["hits with this weapon have no critical damage bonus"] = { flag("NoCritMultiplier", { type = "Condition", var = "{Hand}Attack" }) },
 	["minion critical hits do not deal extra damage"] = { mod("MinionModifier", "LIST", { mod = flag("NoCritMultiplier") }) },
 	["lightning damage with non%-critical hits is lucky"] = { flag("LightningNoCritLucky") },
 	["your damage with critical hits is lucky"] = { flag("CritLucky") },
@@ -3918,6 +3922,7 @@ local specialModList = {
 	} end,
 	["enemies ignited by you during f?l?a?s?k? ?effect take (%d+)%% increased damage"] = function(num) return { mod("EnemyModifier", "LIST", { mod = mod("DamageTaken", "INC", num) }, { type = "ActorCondition", actor = "enemy", var = "Ignited" }) } end,
 	["enemies ignited by you take chaos damage instead of fire damage from ignite"] = { flag("IgniteToChaos") },
+	["ignite you inflict deals chaos damage instead of fire damage"] = { flag("IgniteToChaos") },
 	["enemies chilled by your hits are shocked"] = {
 		mod("ShockBase", "BASE", data.nonDamagingAilment["Shock"].default, { type = "ActorCondition", actor = "enemy", var = "ChilledByYourHits" }),
 		mod("EnemyModifier", "LIST", { mod = flag("Condition:Shocked", { type = "Condition", var = "ChilledByYourHits" }) })
@@ -5952,6 +5957,9 @@ local specialModList = {
 	["attacks cost life instead of mana"] = { flag("CostLifeInsteadOfMana", nil, ModFlag.Attack) },
 
 	["skills gain a base life cost equal to (%d+)%% of base mana cost"] = function(num) return {
+		mod("BaseManaCostAsLifeCost", "BASE", num),
+	} end,
+	["skills gain (%d+)%% of mana cost as extra life cost"] = function(num) return {
 		mod("BaseManaCostAsLifeCost", "BASE", num),
 	} end,
 	["skills gain a base energy shield cost equal to (%d+)%% of base mana cost"] = function(num) return {
