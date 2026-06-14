@@ -527,18 +527,20 @@ end
 
 function TradeQueryClass:OpenUpgradeRecommendationPopup(state)
 	local controls = state.controls
-	local rowHeight = 24
+	local rowHeight = 26
 	local popupWidth, popupHeight = getUpgradeRecommendationPopupSize()
-	state.contentHeight = (#state.rows + 2) * rowHeight
-	state.viewportHeight = popupHeight - 124
-	controls.progress = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, 16, popupWidth - 36, 18}, function()
+	local contentWidth = popupWidth - 72
+	state.contentTop = 64
+	state.viewportHeight = popupHeight - state.contentTop - 64
+	state.contentHeight = #state.rows * rowHeight
+	controls.progress = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, 22, popupWidth - 36, 18}, function()
 		return state.progressLabel or "Preparing upgrade scan..."
 	end)
-	controls.notice = new("LabelControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {18, -36, popupWidth - 220, 16}, "")
-	controls.sectionAnchor = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, 52, 0, 0}, "")
+	controls.notice = new("LabelControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {18, -42, popupWidth - 220, 16}, "")
+	controls.sectionAnchor = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, state.contentTop, 0, 0}, "")
 	for index, row in ipairs(state.rows) do
-		controls["slotStatus"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, (index - 1) * rowHeight, popupWidth - 72, 18}, function()
-			return s_format("%s: %s", row.label or row.slotName, row.status or "Queued")
+		controls["slotStatus"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, (index - 1) * rowHeight, contentWidth, 16}, function()
+			return "^7" .. fitRecommendationText(s_format("%s: %s", row.label or row.slotName, row.status or "Queued"), 16, contentWidth)
 		end)
 	end
 	controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -18, 100, 24}, function()
@@ -551,14 +553,14 @@ function TradeQueryClass:OpenUpgradeRecommendationPopup(state)
 		end
 		main:ClosePopup()
 	end)
-	controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-24, 52, 18, 0}, 50, "VERTICAL", false)
+	controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-24, state.contentTop, 18, 0}, 50, "VERTICAL", false)
 	controls.scrollBar.shown = function()
 		return state.contentHeight > state.viewportHeight
 	end
 	local function scrollBarFunc()
 		controls.scrollBar.height = state.viewportHeight
 		controls.scrollBar:SetContentDimension(state.viewportHeight, state.contentHeight)
-		controls.sectionAnchor.y = -controls.scrollBar.offset
+		controls.sectionAnchor.y = state.contentTop - controls.scrollBar.offset
 	end
 	main:OpenPopup(popupWidth, popupHeight, "Upgrade Recommendations", controls, nil, nil, "close", scrollBarFunc)
 end
@@ -567,47 +569,55 @@ function TradeQueryClass:RenderUpgradeRecommendationResults(state)
 	local controls = state.controls
 	local popupWidth = getUpgradeRecommendationPopupSize()
 	local contentWidth = popupWidth - 72
-	local rowHeight = 64
-	local scanRowHeight = 24
-	local startY = (#state.rows + 1) * scanRowHeight + 14
+	local rowHeight = 82
+	local scanRowHeight = 26
+	local startY = #state.rows * scanRowHeight + 18
 	controls.resultHeader = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
 		{0, startY, contentWidth, 18}, "^7Best fetched upgrades")
 	for index, recommendation in ipairs(state.recommendations) do
 		local row = recommendation.row
 		local result = recommendation.result
 		local y = startY + 24 + (index - 1) * rowHeight
-		local itemWidth = m_max(220, contentWidth - 396)
+		local buttonWidth = 78
+		local buttonGap = 8
+		local buttonX = contentWidth - buttonWidth * 2 - buttonGap
+		local metaWidth = buttonX - 48
+		local slotWidth = m_min(180, m_floor(metaWidth * 0.30))
+		local gainWidth = 86
+		local priceWidth = 126
+		local sellerX = 48 + slotWidth + gainWidth + priceWidth + 24
+		local sellerWidth = m_max(100, buttonX - sellerX - 12)
+		local itemColumnWidth = m_floor((contentWidth - 48) / 2)
 		controls["resultRank"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{0, y + 1, 42, 18}, s_format("#%d", index))
+			{0, y + 1, 38, 18}, s_format("#%d", index))
 		controls["resultSlot"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{50, y + 1, 220, 18}, function()
-			return "^7" .. fitRecommendationText(row.label or row.slotName, 18, 220)
+			{48, y + 1, slotWidth, 18}, function()
+			return "^7" .. fitRecommendationText(row.label or row.slotName, 18, slotWidth)
 		end)
 		controls["resultGain"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{282, y + 1, 86, 18}, function()
+			{48 + slotWidth + 12, y + 1, gainWidth, 18}, function()
 			return s_format("%s+%.3f", colorCodes.POSITIVE, recommendation.gain)
 		end)
 		controls["resultPrice"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{378, y + 1, 150, 18}, function()
-			return "^7" .. fitRecommendationText(formatRecommendationPrice(result), 18, 150)
+			{48 + slotWidth + gainWidth + 18, y + 1, priceWidth, 18}, function()
+			return "^7" .. fitRecommendationText(formatRecommendationPrice(result), 18, priceWidth)
 		end)
 		controls["resultSeller"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{540, y + 1, itemWidth - 150, 18}, function()
-			return "^8" .. fitRecommendationText(result.trader or "", 18, itemWidth - 150)
+			{sellerX, y + 1, sellerWidth, 18}, function()
+			return "^8" .. fitRecommendationText(result.trader or "", 18, sellerWidth)
 		end)
-		local itemColumnWidth = m_floor((contentWidth - 70) / 2)
 		controls["resultCurrent"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{50, y + 32, itemColumnWidth, 16}, function()
+			{48, y + 31, itemColumnWidth, 16}, function()
 			return "^8Current: ^7" ..
 				fitRecommendationText(row.currentItemName or "Current item", 16, itemColumnWidth - 62)
 		end)
 		controls["resultCandidate"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{70 + itemColumnWidth, y + 32, itemColumnWidth, 16}, function()
+			{48 + itemColumnWidth, y + 31, itemColumnWidth, 16}, function()
 			return "^8Candidate: ^7" ..
 				fitRecommendationText(getRecommendationItemName(recommendation.item), 16, itemColumnWidth - 82)
 		end)
 		controls["resultImport"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{contentWidth - 168, y + 4, 78, 24}, "Import", function()
+			{buttonX, y + 4, buttonWidth, 24}, "Import", function()
 			self:ImportUpgradeRecommendation(recommendation)
 		end)
 		controls["resultImport"..index].tooltipFunc = function(tooltip)
@@ -616,7 +626,7 @@ function TradeQueryClass:RenderUpgradeRecommendationResults(state)
 			self.itemsTab:AddItemTooltip(tooltip, item, row.slot, true)
 		end
 		controls["resultSearch"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
-			{contentWidth - 82, y + 4, 78, 24}, "Search", function()
+			{buttonX + buttonWidth + buttonGap, y + 4, buttonWidth, 24}, "Search", function()
 			self:OpenResultSearch(recommendation.query, result, controls.notice)
 		end)
 		controls["resultSearch"..index].tooltipText = "Opens and copies a trade search narrowed to this item."

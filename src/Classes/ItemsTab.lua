@@ -199,7 +199,7 @@ local ItemsTabClass = newClass("ItemsTab", "UndoHandler", "ControlHost", "Contro
 	self.orderedSlots = { }
 	self.slotOrder = { }
 	self.initSockets = true
-	self.slotAnchor = new("Control", {"TOPLEFT",self,"TOPLEFT"}, {96, 76, 310, 0})
+	self.slotAnchor = new("Control", {"TOPLEFT",self,"TOPLEFT"}, {96, 100, 310, 0})
 	local prevSlot = self.slotAnchor
 	local function addSlot(slot)
 		prevSlot = slot
