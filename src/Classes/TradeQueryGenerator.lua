@@ -832,7 +832,11 @@ function TradeQueryGeneratorClass:StartQuery(slot, options)
 	else
 		itemCategoryQueryStr, itemCategory = tradeHelpers.getTradeCategory(slot.slotName, existingItem)
 		if not itemCategory then
-			logToFile("'%s' is not supported for weighted trade query generation", existingItem and existingItem.type or "n/a")
+			local errMsg = s_format("'%s' is not supported for weighted trade query generation", existingItem and existingItem.type or "n/a")
+			logToFile(errMsg)
+			if self.requesterCallback then
+				self.requesterCallback(self.requesterContext, nil, errMsg)
+			end
 			return
 		end
 		if itemCategory == "Jewel" then
@@ -876,10 +880,12 @@ Implicits: 0]]
 	-- OnFrame will pick this up and begin the work
 	self.calcContext.co = coroutine.create(self.ExecuteQuery)
 
-	-- Open progress tracking blocker popup
-	local controls = { }
-	controls.progressText = new("LabelControl", {"TOP",nil,"TOP"}, {0, 30, 0, 16}, string.format("Calculating Mod Weights..."))
-	self.calcContext.popup = main:OpenPopup(280, 65, "Please Wait", controls)
+	if not options.silent then
+		-- Open progress tracking blocker popup
+		local controls = { }
+		controls.progressText = new("LabelControl", {"TOP",nil,"TOP"}, {0, 30, 0, 16}, string.format("Calculating Mod Weights..."))
+		self.calcContext.popup = main:OpenPopup(280, 65, "Please Wait", controls)
+	end
 end
 
 function TradeQueryGeneratorClass:ExecuteQuery()
@@ -968,7 +974,7 @@ function TradeQueryGeneratorClass:FinishQuery()
 		"online",
 		"any",
 	}
-	local selectedTradeType = self.tradeTypes[self.tradeTypeIndex]
+	local selectedTradeType = self.tradeTypes[self.tradeTypeIndex or 1]
 	-- Generate trade query str and open in browser
 	local filters = 0
 	local queryTable = {
@@ -1089,13 +1095,22 @@ function TradeQueryGeneratorClass:FinishQuery()
 	local queryJson = dkjson.encode(queryTable)
 	self.requesterCallback(self.requesterContext, queryJson, errMsg)
 
-	-- Close blocker popup
-	main:ClosePopup()
+	if not self.calcContext.options.silent then
+		-- Close blocker popup
+		main:ClosePopup()
+	end
 end
 
 function TradeQueryGeneratorClass:RequestQuery(slot, context, statWeights, callback)
 	self.requesterCallback = callback
 	self.requesterContext = context
+
+	if context and context.autoExecute then
+		local options = copyTable(context.options or { }, true)
+		options.statWeights = statWeights
+		self:StartQuery(slot, options)
+		return
+	end
 
 	local controls = { }
 	local options = { }

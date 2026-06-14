@@ -430,13 +430,18 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 					t_insert(rawLines, "Sanctified")
 				end
 
+				-- unpriced listings have no price table, and malformed entries may
+				-- lack listing/account; guard so a single bad result doesn't abort the fetch
+				local listing = trade_entry.listing or { }
+				local price = listing.price or { }
+				local account = listing.account or { }
 				table.insert(items, {
-					amount = trade_entry.listing.price.amount,
-					currency = trade_entry.listing.price.currency,
-					priceType = trade_entry.listing.price.type,
+					amount = price.amount,
+					currency = price.currency,
+					priceType = price.type,
 					item_string = table.concat(rawLines, "\n"),
-					whisper = trade_entry.listing.whisper,
-					trader = trade_entry.listing.account.name,
+					whisper = listing.whisper,
+					trader = account.name,
 					weight = trade_entry.item.pseudoMods and trade_entry.item.pseudoMods[1]:match("Sum: (.+)") or "0",
 					id = trade_entry.id
 				})

@@ -181,6 +181,21 @@ local ItemsTabClass = newClass("ItemsTab", "UndoHandler", "ControlHost", "Contro
 		tooltip:AddLine(16, "^7Contains searches from the official trading site to help find")
 		tooltip:AddLine(16, "^7similar or better items for this build")
 	end
+	self.controls.recommendUpgrades = new("ButtonControl", {"LEFT", self.controls.priceDisplayItem, "RIGHT"}, {8, 0, 150, 20}, "Recommend upgrades...", function()
+		self.tradeQuery:RecommendUpgrades()
+	end)
+	self.controls.recommendUpgrades.enabled = function()
+		return main.api and main.api.authToken ~= nil
+	end
+	self.controls.recommendUpgrades.tooltipFunc = function(tooltip)
+		tooltip:Clear()
+		if not main.api or not main.api.authToken then
+			tooltip:AddLine(16, colorCodes.WARNING.."Log in with Path of Exile from Trader before scanning upgrades.")
+		else
+			tooltip:AddLine(16, "^7Scans equipped gear and active jewel sockets to find")
+			tooltip:AddLine(16, "^7which slot has the largest fetched trade upgrade.")
+		end
+	end
 
 	-- Item slots
 	self.slots = { }
