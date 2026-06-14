@@ -14,25 +14,6 @@ describe("TradeQueryRequests", function()
 	}
 	local requests = new("TradeQueryRequests", mock_limiter)
 
-	local function simulateRetry(requests, mock_limiter, policy, current_time)
-		local now = current_time
-		local queue = requests.requestQueue.search
-		local request = table.remove(queue, 1)
-		local requestId = mock_limiter:InsertRequest(policy)
-		local response = { header = "HTTP/1.1 429 Too Many Requests" }
-		mock_limiter:FinishRequest(policy, requestId)
-		mock_limiter:UpdateFromHeader(response.header)
-		local status = response.header:match("HTTP/[%d%%%.]+ (%d+)")
-		if status == "429" then
-			request.attempts = (request.attempts or 0) + 1
-			local backoff = math.min(2 ^ request.attempts, 60)
-			request.retryTime = now + backoff
-			table.insert(queue, 1, request)
-			return true, request.attempts, request.retryTime
-		end
-		return false, nil, nil
-	end
-
 	describe("ProcessQueue", function()
 		-- Pass: No changes to empty queues
 		-- Fail: Alters queues unexpectedly, indicating loop errors, causing phantom requests
@@ -45,9 +26,10 @@ describe("TradeQueryRequests", function()
 		-- Pass: Dequeues and processes valid item
 		-- Fail: Queue unchanged, indicating timing/insertion bug, blocking trade searches
 		it("processes search queue item", function()
-			local orig_launch = launch
-			launch = {
-				DownloadPage = function(url, onComplete, opts)
+			local env = getfenv(requests.ProcessQueue)
+			local orig_launch = env.launch
+			env.launch = {
+				DownloadPage = function(self, url, onComplete, opts)
 					onComplete({ body = "{}", header = "HTTP/1.1 200 OK" }, nil)
 				end
 			}
@@ -62,7 +44,60 @@ describe("TradeQueryRequests", function()
 			mock_limiter.NextRequestTime = mock_next_time
 			requests:ProcessQueue()
 			assert.are.equal(#requests.requestQueue.search, 0)
-			launch = orig_launch
+			env.launch = orig_launch
+		end)
+
+		-- Pass: Search queue waits 5 seconds between dispatches and reports the wait
+		-- Fail: Immediate second search risks repeated rate limiting during recommendations
+		it("spaces search requests by 5 seconds", function()
+			local orig_os_time = os.time
+			local requests = new("TradeQueryRequests", mock_limiter)
+			local env = getfenv(requests.ProcessQueue)
+			local orig_launch = env.launch
+			local mock_time = 1000
+			local downloadCount = 0
+			os.time = function() return mock_time end
+			env.launch = {
+				DownloadPage = function(self, url, onComplete, opts)
+					downloadCount = downloadCount + 1
+					onComplete({ body = "{}", header = "HTTP/1.1 200 OK" }, nil)
+				end
+			}
+			mock_limiter.NextRequestTime = function(self, policy, time)
+				return time - 1
+			end
+			table.insert(requests.requestQueue.search, {
+				url = "first",
+				callback = function() end,
+			})
+			table.insert(requests.requestQueue.search, {
+				url = "second",
+				callback = function() end,
+			})
+
+			requests:ProcessQueue()
+			assert.are.equal(1, downloadCount)
+			assert.are.equal(1, #requests.requestQueue.search)
+
+			local capturedBackoff = nil
+			local capturedRateLimited = nil
+			requests:ProcessQueue(function(backoff, rateLimited)
+				capturedBackoff = backoff
+				capturedRateLimited = rateLimited
+			end)
+			assert.are.equal(5, capturedBackoff)
+			-- waiting purely on the 5s self-pacing is not a real rate limit
+			assert.is_false(capturedRateLimited)
+			assert.are.equal(1, downloadCount)
+			assert.are.equal(1, #requests.requestQueue.search)
+
+			mock_time = mock_time + 5
+			requests:ProcessQueue()
+			assert.are.equal(2, downloadCount)
+			assert.are.equal(0, #requests.requestQueue.search)
+
+			os.time = orig_os_time
+			env.launch = orig_launch
 		end)
 
 		-- Pass: Does not crash on 401, and passes error message
@@ -78,12 +113,17 @@ Server: cloudflare
 WWW-Authenticate: Bearer realm="pathofexile:production", error="invalid_token", error_description="The access token provided is invalid or has expired"
 Cache-Control: no-store
 Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
-		local orig_launch = launch
-			launch = {
-				DownloadPage = function(url, onComplete, opts)
-					onComplete({ body = json, header = header }, nil)
+			local env = getfenv(requests.ProcessQueue)
+			local orig_launch = env.launch
+			local orig_reset_details = env.main.api.ResetDetails
+			env.main.api.ResetDetails = function() end
+			env.launch = {
+				DownloadPage = function(self, url, onComplete, opts)
+					onComplete({ body = json, header = header }, "Response code: 401")
 				end
 			}
+			requests.requestQueue = { search = {}, fetch = {} }
+			requests.nextSearchTime = 0
 			table.insert(requests.requestQueue.search, {
 				url = "test",
 				callback = function(body, msg)
@@ -97,16 +137,27 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 			end
 			mock_limiter.NextRequestTime = mock_next_time
 			requests:ProcessQueue()
-			assert.are.equal(#requests.requestQueue.search, 0)
-			launch = orig_launch
+			assert.are.equal(0, #requests.requestQueue.search)
+			env.launch = orig_launch
+			env.main.api.ResetDetails = orig_reset_details
 		end)
 
-		-- Pass: Retries with increasing backoff up to cap, preventing infinite loops
-		-- Fail: No backoff or uncapped, indicating retry bug, risking API bans
-		it("retries on 429 with exponential backoff", function()
+		-- Pass: Retries every 5 seconds after 429, preventing aggressive repeat searches
+		-- Fail: Lower backoff indicates retry bug, risking repeated API rate limits
+		it("retries on 429 with fixed 5 second backoff", function()
 			local orig_os_time = os.time
+			local requests = new("TradeQueryRequests", mock_limiter)
+			local env = getfenv(requests.ProcessQueue)
+			local orig_launch = env.launch
 			local mock_time = 1000
+			local downloadCalled = false
 			os.time = function() return mock_time end
+			env.launch = {
+				DownloadPage = function(self, url, onComplete, opts)
+					downloadCalled = true
+					onComplete({ body = "", header = "HTTP/1.1 429 Too Many Requests\nRetry-After: 3" }, nil)
+				end
+			}
 
 			local request = {
 				url = "test",
@@ -114,18 +165,33 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 				retryTime = nil,
 				attempts = 0
 			}
+			requests.requestQueue = { search = {}, fetch = {} }
 			table.insert(requests.requestQueue.search, request)
 
-			local policy = mock_limiter:GetPolicyName("search")
+			mock_limiter.NextRequestTime = function(self, policy, time)
+				return time - 1
+			end
+			assert.are.equal(mock_time - 1, requests.rateLimiter:NextRequestTime("search", mock_time))
+			assert.are.equal(1, #requests.requestQueue.search)
 
 			for i = 1, 7 do
 				local previous_time = mock_time
-				local entered, attempts, retryTime = simulateRetry(requests, mock_limiter, policy, mock_time)
-				assert.is_true(entered)
-				assert.are.equal(attempts, i)
-				local expected_backoff = math.min(math.pow(2, i), 60)
-				assert.are.equal(retryTime, previous_time + expected_backoff)
-				mock_time = retryTime
+				local capturedBackoff = nil
+				local capturedRateLimited = nil
+				downloadCalled = false
+				requests:ProcessQueue(function(backoff, rateLimited)
+					capturedBackoff = backoff
+					capturedRateLimited = rateLimited
+				end)
+				assert.is_true(downloadCalled)
+				-- a 429 response is a genuine rate limit
+				assert.is_true(capturedRateLimited)
+				assert.are.equal(1, #requests.requestQueue.search)
+				assert.are.equal(i, requests.requestQueue.search[1].attempts)
+				local expected_backoff = 5
+				assert.are.equal(expected_backoff, capturedBackoff)
+				assert.are.equal(previous_time + expected_backoff, requests.requestQueue.search[1].retryTime)
+				mock_time = requests.requestQueue.search[1].retryTime
 			end
 
 			-- Validate skip when time < retryTime
@@ -135,9 +201,10 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 			end
 			mock_limiter.NextRequestTime = mock_next_time
 			requests:ProcessQueue()
-			assert.are.equal(#requests.requestQueue.search, 1)
+			assert.are.equal(1, #requests.requestQueue.search)
 
 			os.time = orig_os_time
+			env.launch = orig_launch
 		end)
 	end)
 

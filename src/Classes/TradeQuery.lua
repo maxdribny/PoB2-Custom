@@ -243,20 +243,27 @@ function TradeQueryClass:EnsureTradeSearchServices()
 		self.tradeQueryGenerator:OnFrame()
 	end
 	main.onFrameFuncs["TradeQueryRequests"] = function()
-		self.tradeQueryRequests:ProcessQueue(function(backoff)
+		self.tradeQueryRequests:ProcessQueue(function(backoff, rateLimited)
 			if self.upgradeRecommender and self.upgradeRecommender.controls and self.upgradeRecommender.controls.notice then
 				self.upgradeRecommender.rateLimitFinish = get_time() + backoff
+				self.upgradeRecommender.rateLimited = rateLimited
 			end
 		end)
 		if self.upgradeRecommender and self.upgradeRecommender.rateLimitFinish then
 			local now = get_time()
 			if self.upgradeRecommender.rateLimitFinish < (now + 0.5) then
 				self.upgradeRecommender.rateLimitFinish = nil
+				self.upgradeRecommender.rateLimited = nil
 				if self.upgradeRecommender.controls.notice then
 					self.upgradeRecommender.controls.notice.label = ""
 				end
 			elseif self.upgradeRecommender.controls.notice then
-				self.upgradeRecommender.controls.notice.label = s_format("%sRate limited. Retrying after %s seconds...", colorCodes.WARNING, self.upgradeRecommender.rateLimitFinish - now)
+				local secondsLeft = m_ceil(self.upgradeRecommender.rateLimitFinish - now)
+				if self.upgradeRecommender.rateLimited then
+					self.upgradeRecommender.controls.notice.label = s_format("%sRate limited. Retrying after %d seconds...", colorCodes.WARNING, secondsLeft)
+				else
+					self.upgradeRecommender.controls.notice.label = s_format("%sNext search in %d seconds...", colorCodes.NORMAL, secondsLeft)
+				end
 			end
 		end
 	end
@@ -1129,7 +1136,7 @@ Highest Weight - Displays the order retrieved from trade]]
 		self.controls.sectionAnchor.y = -self.controls.scrollBar.offset
 	end
 
-	local function onRateLimit(backoff)
+	local function onRateLimit(backoff, rateLimited)
 		self.backoffFinish = get_time() + backoff
 		self.countDown = coroutine.create(function()
 			while self.backoffFinish  do
@@ -1139,8 +1146,11 @@ Highest Weight - Displays the order retrieved from trade]]
 					self:SetNotice(self.controls.pbNotice, "")
 					return
 				end
-				local msg = s_format("Rate limited. Retrying after %s seconds...",  self.backoffFinish - now)
-				self:SetNotice(self.controls.pbNotice, colorCodes.WARNING..msg)
+				local secondsLeft = m_ceil(self.backoffFinish - now)
+				local msg = rateLimited
+					and s_format("Rate limited. Retrying after %d seconds...", secondsLeft)
+					or s_format("Next search in %d seconds...", secondsLeft)
+				self:SetNotice(self.controls.pbNotice, (rateLimited and colorCodes.WARNING or colorCodes.NORMAL)..msg)
 				coroutine.yield()
 			end
 		end)

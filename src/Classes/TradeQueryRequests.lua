@@ -6,6 +6,9 @@
 
 local dkjson = require "dkjson"
 
+local RATE_LIMIT_RETRY_SECONDS = 5
+local TRADE_SEARCH_INTERVAL_SECONDS = 5
+
 ---@class TradeQueryRequests
 local TradeQueryRequestsClass = newClass("TradeQueryRequests", function(self, rateLimiter)
 	self.maxFetchPerSearch = 10
@@ -15,27 +18,38 @@ local TradeQueryRequestsClass = newClass("TradeQueryRequests", function(self, ra
 		["search"] = {},
 		["fetch"] = {},
 	}
+	self.nextSearchTime = 0
 	self.hostName = "https://www.pathofexile.com/"
 end)
 
 ---Main routine for processing request queue
---- @param onRateLimit fun(integer)?
+--- @param onRateLimit fun(seconds:integer, rateLimited:boolean)?
 function TradeQueryRequestsClass:ProcessQueue(onRateLimit)
 	for key, queue in pairs(self.requestQueue) do
 		if #queue > 0 then
 			local policy = self.rateLimiter:GetPolicyName(key)
 			local now = os.time()
 			local timeNext = self.rateLimiter:NextRequestTime(policy, now)
+			-- a wait imposed by the rate limiter (or a 429 below) is a genuine rate
+			-- limit; the extra search spacing applied below is just self-pacing and
+			-- must not be reported to the user as a rate limit
+			local rateLimited = (timeNext - now) > 1 and timeNext ~= 1956528000
+			if key == "search" then
+				timeNext = math.max(timeNext, self.nextSearchTime or 0)
+			end
 			local timeLeft = timeNext - now
 			-- relay wait info to caller when actually waiting, and not just
 			-- getting a magic poe2 release date number
 			if onRateLimit and timeLeft > 1 and timeNext ~= 1956528000 then
-				onRateLimit(timeLeft)
+				onRateLimit(timeLeft, rateLimited)
 			end
 			if not (queue[1].retryTime and now < queue[1].retryTime) then
 				if now >= timeNext then
 					local request = table.remove(queue, 1)
 					local requestId = self.rateLimiter:InsertRequest(policy)
+					if key == "search" then
+						self.nextSearchTime = now + TRADE_SEARCH_INTERVAL_SECONDS
+					end
 					local onComplete = function(response, errMsg)
 						self.rateLimiter:FinishRequest(policy, requestId)
 						self.rateLimiter:UpdateFromHeader(response.header, policy)
@@ -44,13 +58,13 @@ function TradeQueryRequestsClass:ProcessQueue(onRateLimit)
 							retryAfter = retryAfter and tonumber(retryAfter) or 0
 							request.attempts = (request.attempts or 0) + 1
 							
-							local backoff = math.max(math.min(2 ^ request.attempts, 60), retryAfter)
+							local backoff = math.max(RATE_LIMIT_RETRY_SECONDS, retryAfter)
 							request.retryTime = os.time() + backoff
 							table.insert(queue, 1, request)
 							-- optional callback with the backoff time when rate
 							-- limited to inform user
 							if onRateLimit then
-								onRateLimit(backoff)
+								onRateLimit(backoff, true)
 							end
 							return
 						end
