@@ -25,7 +25,20 @@ $env:LUA_CPATH="$PWD\runtime\?.dll;$env:LUA_CPATH"
 busted --config-file=.busted --run=default --lua=luajit "../spec/System/<name>_spec.lua"
 ```
 
-The `.busted` config changes the working directory to `src`, so single-spec paths use `../spec/...`. For modifier parsing changes, reload PoB with `Ctrl` + `F5` or run the headless cache regeneration and commit `src/Data/ModCache.lua` if it changes.
+Run the full default suite from the repo root with:
+
+```
+$env:LUA_CPATH="$PWD\runtime\?.dll;$env:LUA_CPATH"
+busted --config-file=.busted --run=default --lua=luajit
+```
+
+LuaJIT is expected to be installed on this machine. For syntax-only checks, use:
+
+```
+luajit -b src\Classes\TradeQuery.lua NUL
+```
+
+The `.busted` config changes the working directory to `src`, so single-spec paths use `../spec/...`. Full-suite and LuaJIT commands may take time; use a long timeout rather than skipping them. If a command prints the expected output but the agent tool reports a timeout, diagnose the shell invocation before treating the command as failed. In Codex on Windows/PowerShell, prefer `login=false` for `shell_command` calls when commands otherwise hang after producing output. For modifier parsing changes, reload PoB with `Ctrl` + `F5` or run the headless cache regeneration and commit `src/Data/ModCache.lua` if it changes.
 
 ## Commit & Pull Request Guidelines
 
