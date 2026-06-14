@@ -18,7 +18,14 @@ Lua files use tabs for indentation and a 120-column target from `.editorconfig`.
 
 ## Testing Guidelines
 
-Add or update specs in `spec/System`, using the existing `*_spec.lua` naming convention. Run the narrow spec first, then broader Busted coverage when changing shared calculation, parsing, or data behavior. For modifier parsing changes, reload PoB with `Ctrl` + `F5` or run the headless cache regeneration and commit `src/Data/ModCache.lua` if it changes.
+Add or update specs in `spec/System`, using the existing `*_spec.lua` naming convention. Run the narrow spec first, then broader Busted coverage when changing shared calculation, parsing, or data behavior. When running Busted locally from PowerShell with LuaRocks-installed `busted`, include the bundled runtime DLLs on `LUA_CPATH` so modules such as `lua-utf8` load correctly. From the repo root, use:
+
+```
+$env:LUA_CPATH="$PWD\runtime\?.dll;$env:LUA_CPATH"
+busted --config-file=.busted --run=default --lua=luajit "../spec/System/<name>_spec.lua"
+```
+
+The `.busted` config changes the working directory to `src`, so single-spec paths use `../spec/...`. For modifier parsing changes, reload PoB with `Ctrl` + `F5` or run the headless cache regeneration and commit `src/Data/ModCache.lua` if it changes.
 
 ## Commit & Pull Request Guidelines
 

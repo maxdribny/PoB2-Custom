@@ -45,12 +45,21 @@ To run locally with a Lua toolchain installed (LuaJIT + busted), from `src/`:
 busted --lua=luajit
 ```
 
+On Windows/PowerShell with Busted installed via LuaRocks, the external LuaJIT process may not find the bundled runtime C modules by default. From the repo root, prepend `runtime\?.dll` to `LUA_CPATH` and let `.busted` load `src/HeadlessWrapper.lua`:
+
+```
+$env:LUA_CPATH="$PWD\runtime\?.dll;$env:LUA_CPATH"
+busted --config-file=.busted --run=default --lua=luajit
+```
+
 Run a single spec or filter:
 
 ```
-busted --lua=luajit spec/System/TestSkills_spec.lua
-busted --lua=luajit --filter="<pattern>"
+busted --config-file=.busted --run=default --lua=luajit "../spec/System/TestSkills_spec.lua"
+busted --config-file=.busted --run=default --lua=luajit --filter="<pattern>"
 ```
+
+The `.busted` config changes the working directory to `src`, so explicit single-spec paths are relative to `src` even when the command is launched from the repo root.
 
 The `builds` tag is excluded by default (`exclude-tags` in `.busted`).
 
