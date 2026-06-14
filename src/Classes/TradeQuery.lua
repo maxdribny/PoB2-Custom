@@ -13,12 +13,40 @@ local t_remove = table.remove
 local t_sort = table.sort
 local m_max = math.max
 local m_min = math.min
+local m_floor = math.floor
 local m_ceil = math.ceil
 local s_format = string.format
 
 local baseSlots = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour", "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Ring 3", "Belt", "Charm 1", "Charm 2", "Charm 3", "Flask 1", "Flask 2" }
 local tradeHelpers = LoadModule("Classes/TradeHelpers")
 local UPGRADE_EPSILON = 0.0001
+
+local function fitRecommendationText(text, fontSize, maxWidth)
+	text = tostring(text or "")
+	maxWidth = m_max(maxWidth or 0, DrawStringWidth(fontSize, "VAR", "..."))
+	if DrawStringWidth(fontSize, "VAR", text) <= maxWidth then
+		return text
+	end
+	local suffix = "..."
+	local low, high, best = 0, #text, suffix
+	while low <= high do
+		local mid = m_floor((low + high) / 2)
+		local candidate = text:sub(1, mid) .. suffix
+		if DrawStringWidth(fontSize, "VAR", candidate) <= maxWidth then
+			best = candidate
+			low = mid + 1
+		else
+			high = mid - 1
+		end
+	end
+	return best
+end
+
+local function getUpgradeRecommendationPopupSize()
+	local screenW = main.screenW or 1280
+	local screenH = main.screenH or 800
+	return m_min(1180, screenW - 40), m_min(760, screenH - 40)
+end
 
 local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	self.itemsTab = itemsTab
@@ -499,22 +527,21 @@ end
 
 function TradeQueryClass:OpenUpgradeRecommendationPopup(state)
 	local controls = state.controls
-	local rowHeight = 20
-	local popupWidth = 980
-	local popupHeight = 680
+	local rowHeight = 24
+	local popupWidth, popupHeight = getUpgradeRecommendationPopupSize()
 	state.contentHeight = (#state.rows + 2) * rowHeight
-	state.viewportHeight = popupHeight - 115
-	controls.progress = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {16, 16, popupWidth - 32, 16}, function()
+	state.viewportHeight = popupHeight - 124
+	controls.progress = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, 16, popupWidth - 36, 18}, function()
 		return state.progressLabel or "Preparing upgrade scan..."
 	end)
-	controls.notice = new("LabelControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {16, -34, 560, 16}, "")
-	controls.sectionAnchor = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {16, 48, 0, 0}, "")
+	controls.notice = new("LabelControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {18, -36, popupWidth - 220, 16}, "")
+	controls.sectionAnchor = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {18, 52, 0, 0}, "")
 	for index, row in ipairs(state.rows) do
-		controls["slotStatus"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, (index - 1) * rowHeight, 910, 16}, function()
+		controls["slotStatus"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, (index - 1) * rowHeight, popupWidth - 72, 18}, function()
 			return s_format("%s: %s", row.label or row.slotName, row.status or "Queued")
 		end)
 	end
-	controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -16, 90, 20}, function()
+	controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -18, 100, 24}, function()
 		return state.done and "Done" or "Cancel"
 	end, function()
 		state.cancelled = true
@@ -524,7 +551,7 @@ function TradeQueryClass:OpenUpgradeRecommendationPopup(state)
 		end
 		main:ClosePopup()
 	end)
-	controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-22, 48, 18, 0}, 50, "VERTICAL", false)
+	controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-24, 52, 18, 0}, 50, "VERTICAL", false)
 	controls.scrollBar.shown = function()
 		return state.contentHeight > state.viewportHeight
 	end
@@ -538,24 +565,49 @@ end
 
 function TradeQueryClass:RenderUpgradeRecommendationResults(state)
 	local controls = state.controls
-	local rowHeight = 24
-	local startY = (#state.rows + 1) * 20 + 10
-	controls.resultHeader = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, startY, 920, 16}, "^7Rank  Slot                  Current item                 Best candidate               Gain      Price             Seller")
+	local popupWidth = getUpgradeRecommendationPopupSize()
+	local contentWidth = popupWidth - 72
+	local rowHeight = 64
+	local scanRowHeight = 24
+	local startY = (#state.rows + 1) * scanRowHeight + 14
+	controls.resultHeader = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+		{0, startY, contentWidth, 18}, "^7Best fetched upgrades")
 	for index, recommendation in ipairs(state.recommendations) do
 		local row = recommendation.row
 		local result = recommendation.result
-		local y = startY + index * rowHeight
-		controls["resultLabel"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, y + 2, 730, 16}, function()
-			return s_format("%d. %-20s %-28s %-28s +%.3f   %-16s %s",
-				index,
-				row.label or row.slotName,
-				row.currentItemName or "Current",
-				getRecommendationItemName(recommendation.item),
-				recommendation.gain,
-				formatRecommendationPrice(result),
-				result.trader or "")
+		local y = startY + 24 + (index - 1) * rowHeight
+		local itemWidth = m_max(220, contentWidth - 396)
+		controls["resultRank"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{0, y + 1, 42, 18}, s_format("#%d", index))
+		controls["resultSlot"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{50, y + 1, 220, 18}, function()
+			return "^7" .. fitRecommendationText(row.label or row.slotName, 18, 220)
 		end)
-		controls["resultImport"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {738, y, 78, 20}, "Import", function()
+		controls["resultGain"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{282, y + 1, 86, 18}, function()
+			return s_format("%s+%.3f", colorCodes.POSITIVE, recommendation.gain)
+		end)
+		controls["resultPrice"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{378, y + 1, 150, 18}, function()
+			return "^7" .. fitRecommendationText(formatRecommendationPrice(result), 18, 150)
+		end)
+		controls["resultSeller"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{540, y + 1, itemWidth - 150, 18}, function()
+			return "^8" .. fitRecommendationText(result.trader or "", 18, itemWidth - 150)
+		end)
+		local itemColumnWidth = m_floor((contentWidth - 70) / 2)
+		controls["resultCurrent"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{50, y + 32, itemColumnWidth, 16}, function()
+			return "^8Current: ^7" ..
+				fitRecommendationText(row.currentItemName or "Current item", 16, itemColumnWidth - 62)
+		end)
+		controls["resultCandidate"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{70 + itemColumnWidth, y + 32, itemColumnWidth, 16}, function()
+			return "^8Candidate: ^7" ..
+				fitRecommendationText(getRecommendationItemName(recommendation.item), 16, itemColumnWidth - 82)
+		end)
+		controls["resultImport"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{contentWidth - 168, y + 4, 78, 24}, "Import", function()
 			self:ImportUpgradeRecommendation(recommendation)
 		end)
 		controls["resultImport"..index].tooltipFunc = function(tooltip)
@@ -563,14 +615,17 @@ function TradeQueryClass:RenderUpgradeRecommendationResults(state)
 			local item = new("Item", result.item_string)
 			self.itemsTab:AddItemTooltip(tooltip, item, row.slot, true)
 		end
-		controls["resultSearch"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {824, y, 78, 20}, "Search", function()
+		controls["resultSearch"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{contentWidth - 82, y + 4, 78, 24}, "Search", function()
 			self:OpenResultSearch(recommendation.query, result, controls.notice)
 		end)
 		controls["resultSearch"..index].tooltipText = "Opens and copies a trade search narrowed to this item."
 	end
 	state.contentHeight = startY + (#state.recommendations + 2) * rowHeight
 	if #state.recommendations == 0 then
-		controls.noResults = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, startY + rowHeight, 920, 16}, "^7No positive market-backed upgrades were found in the fetched results.")
+		controls.noResults = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"},
+			{0, startY + rowHeight, contentWidth, 16},
+			"^7No positive market-backed upgrades were found in the fetched results.")
 	end
 end
 
