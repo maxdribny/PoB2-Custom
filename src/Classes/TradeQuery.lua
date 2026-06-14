@@ -17,6 +17,8 @@ local m_ceil = math.ceil
 local s_format = string.format
 
 local baseSlots = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour", "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Ring 3", "Belt", "Charm 1", "Charm 2", "Charm 3", "Flask 1", "Flask 2" }
+local tradeHelpers = LoadModule("Classes/TradeHelpers")
+local UPGRADE_EPSILON = 0.0001
 
 local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	self.itemsTab = itemsTab
@@ -43,6 +45,7 @@ local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	self.pbRealm = ""
 	self.pbRealmIndex = 1
 	self.pbLeagueIndex = 1
+	self.maxFetchPerSearchDefault = 2
 	-- table holding all realm/league pairs. (allLeagues[realm] = [league.id,...])
 	self.allLeagues = {}
 	-- realm id-text table to pair realm name with API parameter
@@ -55,6 +58,7 @@ local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	self.lastQueries = {}
 
 	self.tradeQueryRequests = new("TradeQueryRequests")
+	self.tradeQueryRequests.maxFetchPerSearch = 10 * self.maxFetchPerSearchDefault
 	if not main.api then
 		main.api = new("PoEAPI", main.lastToken, main.lastRefreshToken, main.tokenExpiry)
 	end
@@ -193,6 +197,478 @@ local function isSameAsDefaultList(list)
 	return list and #list == 2
 		and list[1].stat == "FullDPS" and list[1].weightMult == 1.0
 		and list[2].stat == "TotalEHP" and list[2].weightMult == 0.5
+end
+
+function TradeQueryClass:EnsureTradeSearchWeights()
+	if not self.statSortSelectionList or (#self.statSortSelectionList) == 0 then
+		self.statSortSelectionList = { }
+		initStatSortSelectionList(self.statSortSelectionList)
+	end
+	return self.statSortSelectionList
+end
+
+function TradeQueryClass:EnsureTradeSearchServices()
+	if not self.tradeQueryGenerator then
+		self.tradeQueryGenerator = new("TradeQueryGenerator", self)
+	end
+	main.onFrameFuncs["TradeQueryGenerator"] = function()
+		self.tradeQueryGenerator:OnFrame()
+	end
+	main.onFrameFuncs["TradeQueryRequests"] = function()
+		self.tradeQueryRequests:ProcessQueue(function(backoff)
+			if self.upgradeRecommender and self.upgradeRecommender.controls and self.upgradeRecommender.controls.notice then
+				self.upgradeRecommender.rateLimitFinish = get_time() + backoff
+			end
+		end)
+		if self.upgradeRecommender and self.upgradeRecommender.rateLimitFinish then
+			local now = get_time()
+			if self.upgradeRecommender.rateLimitFinish < (now + 0.5) then
+				self.upgradeRecommender.rateLimitFinish = nil
+				if self.upgradeRecommender.controls.notice then
+					self.upgradeRecommender.controls.notice.label = ""
+				end
+			elseif self.upgradeRecommender.controls.notice then
+				self.upgradeRecommender.controls.notice.label = s_format("%sRate limited. Retrying after %s seconds...", colorCodes.WARNING, self.upgradeRecommender.rateLimitFinish - now)
+			end
+		end
+	end
+	return self.tradeQueryGenerator
+end
+
+local function isSlotShown(slot)
+	if not slot then
+		return false
+	end
+	if slot.IsShown then
+		return slot:IsShown()
+	end
+	if slot.shown then
+		return slot.shown()
+	end
+	return not slot.inactive
+end
+
+local function isExcludedRecommendationSlot(slotName)
+	return slotName:find("Flask") or slotName:find("Charm")
+end
+
+function TradeQueryClass:IsUpgradeRecommendationSlotEligible(slot, item)
+	if not slot or not item or not item.base or not slot.slotName then
+		return false
+	end
+	if not isSlotShown(slot) or isExcludedRecommendationSlot(slot.slotName) then
+		return false
+	end
+	local _, itemCategory = tradeHelpers.getTradeCategory(slot.slotName, item)
+	return itemCategory ~= nil
+end
+
+function TradeQueryClass:BuildUpgradeRecommendationSlotRows()
+	local rows = { }
+	local seenSlots = { }
+	local function addSlot(slot, label)
+		if not slot or seenSlots[slot.slotName] then
+			return
+		end
+		seenSlots[slot.slotName] = true
+		local item = self.itemsTab.items[slot.selItemId]
+		if not self:IsUpgradeRecommendationSlotEligible(slot, item) then
+			return
+		end
+		local slotTbl = slot.nodeId and { slotName = slot.label or label or slot.slotName, nodeId = slot.nodeId }
+			or { slotName = label or slot.label or slot.slotName, fullName = slot.slotName }
+		t_insert(rows, {
+			label = label or slot.label or slot.slotName,
+			slotName = slot.slotName,
+			slot = slot,
+			slotTbl = slotTbl,
+			currentItem = item,
+			currentItemName = item.name or item.baseName or slot.slotName,
+		})
+	end
+
+	for _, slotName in ipairs(baseSlots) do
+		addSlot(self.itemsTab.slots[slotName], slotName)
+		for _, slot in ipairs(self.itemsTab.orderedSlots or { }) do
+			if slot.parentSlot and slot.parentSlot.slotName == slotName then
+				addSlot(slot, slot.label or slot.slotName)
+			end
+		end
+	end
+
+	local activeSocketList = { }
+	for nodeId, slot in pairs(self.itemsTab.sockets or { }) do
+		if not slot.inactive then
+			t_insert(activeSocketList, nodeId)
+		end
+	end
+	table.sort(activeSocketList)
+	for _, nodeId in ipairs(activeSocketList) do
+		local slot = self.itemsTab.sockets[nodeId]
+		addSlot(slot, slot.label or ("Socket " .. tostring(nodeId)))
+	end
+
+	return rows
+end
+
+function TradeQueryClass:GetRecommendationSlotName(row)
+	return row and row.slotName or nil
+end
+
+function TradeQueryClass:SanitizeFetchedItemsForRecommendation(items, slotTbl)
+	local generator = self.tradeQueryGenerator or { }
+	local itemsSafe = { }
+	for _, entry in ipairs(items or { }) do
+		local item = entry.item_string and new("Item", entry.item_string)
+		if item and item.base then
+			local safeEntry = copyTable(entry, true)
+			t_insert(itemsSafe, safeEntry)
+		end
+	end
+
+	if generator.lastAugmentBehaviour == "Copy Current" or generator.lastAnointBehaviour == "Copy Current" then
+		for i, _ in ipairs(itemsSafe) do
+			local item = new("Item", itemsSafe[i].item_string)
+			if item.base and item.type and self.itemsTab.CopyAnointsAndAugments then
+				self.itemsTab:CopyAnointsAndAugments(item, true, true, slotTbl.slotName)
+				itemsSafe[i].item_string = item:BuildRaw()
+			end
+		end
+	elseif generator.lastAugmentBehaviour == "Remove" then
+		for item_idx, _ in ipairs(itemsSafe) do
+			local item = new("Item", itemsSafe[item_idx].item_string)
+			for rune_idx, _ in ipairs(item.runes or {}) do
+				item.runes[rune_idx] = "None"
+			end
+			item:UpdateRunes()
+			itemsSafe[item_idx].item_string = item:BuildRaw()
+		end
+	elseif generator.lastAnointBehaviour == "Remove" then
+		for i, _ in ipairs(itemsSafe) do
+			local item = new("Item", itemsSafe[i].item_string)
+			item.enchantModLines = {}
+			itemsSafe[i].item_string = item:BuildRaw()
+		end
+	end
+
+	return itemsSafe
+end
+
+function TradeQueryClass:EvaluateUpgradeCandidate(row, result, calcFunc, baseOutput, statWeights)
+	if not result or not result.item_string then
+		return nil
+	end
+	local item = new("Item", result.item_string)
+	if not item.base then
+		return nil
+	end
+	local output = calcFunc({ repSlotName = self:GetRecommendationSlotName(row), repItem = item })
+	local weight = self.tradeQueryGenerator.WeightedRatioOutputs(baseOutput, output, statWeights)
+	return {
+		item = item,
+		output = output,
+		weight = weight,
+		result = result,
+	}
+end
+
+function TradeQueryClass:GetBestUpgradeRecommendationForSlot(row, items, calcFunc, baseOutput, statWeights)
+	statWeights = statWeights or self:EnsureTradeSearchWeights()
+	local baselineWeight = self.tradeQueryGenerator.WeightedRatioOutputs(baseOutput, baseOutput, statWeights)
+	local best
+	for _, result in ipairs(items or { }) do
+		local candidate = self:EvaluateUpgradeCandidate(row, result, calcFunc, baseOutput, statWeights)
+		if candidate then
+			candidate.gain = candidate.weight - baselineWeight
+			if candidate.gain > UPGRADE_EPSILON and (not best or candidate.gain > best.gain) then
+				best = candidate
+			end
+		end
+	end
+	if best then
+		best.row = row
+	end
+	return best
+end
+
+function TradeQueryClass:SortUpgradeRecommendations(recommendations)
+	table.sort(recommendations, function(a, b)
+		if a.gain ~= b.gain then
+			return a.gain > b.gain
+		end
+		return (a.row.label or a.row.slotName) < (b.row.label or b.row.slotName)
+	end)
+	return recommendations
+end
+
+local function formatRecommendationPrice(result)
+	if result.amount and result.currency then
+		return s_format("%s %s", result.amount, result.currency)
+	end
+	return "unpriced"
+end
+
+local function getRecommendationItemName(item)
+	return item and (item.name or item.baseName or item.baseType or "Item") or "Item"
+end
+
+function TradeQueryClass:GetRecommendationQueryOptions(row)
+	local slot = row.slot
+	local slotName = slot.slotName
+	local options = {
+		includeCorrupted = self.tradeQueryGenerator.lastIncludeCorrupted == nil or self.tradeQueryGenerator.lastIncludeCorrupted == true,
+		includeMirrored = self.tradeQueryGenerator.lastIncludeMirrored == nil or self.tradeQueryGenerator.lastIncludeMirrored == true,
+		silent = true,
+	}
+	if slotName:find("Jewel") then
+		options.jewelType = row.currentItem and row.currentItem.base and row.currentItem.base.subType == "Radius" and "Radius" or "Base"
+	end
+
+	local isAugmentableSlot = slotName:find("Weapon 1") or slotName:find("Weapon 2") or slotName:find("Helmet")
+		or slotName:find("Body Armour") or slotName:find("Gloves") or slotName:find("Boots")
+	local isAmulet = slotName:find("Amulet") ~= nil
+	self.tradeQueryGenerator.lastAugmentBehaviour = isAugmentableSlot and (self.tradeQueryGenerator.lastAugmentBehaviour or "Copy Current") or nil
+	self.tradeQueryGenerator.lastAnointBehaviour = isAmulet and (self.tradeQueryGenerator.lastAnointBehaviour or "Copy Current") or nil
+	options.includeRunes = self.tradeQueryGenerator.lastAugmentBehaviour == "Keep"
+	return options
+end
+
+function TradeQueryClass:RestoreUpgradeRecommendationBehaviours(state)
+	if not state or not self.tradeQueryGenerator then
+		return
+	end
+	self.tradeQueryGenerator.lastAugmentBehaviour = state.previousAugmentBehaviour
+	self.tradeQueryGenerator.lastAnointBehaviour = state.previousAnointBehaviour
+end
+
+function TradeQueryClass:ImportUpgradeRecommendation(recommendation)
+	if not recommendation or not recommendation.result or not recommendation.result.item_string then
+		return
+	end
+	local row = recommendation.row
+	self.itemsTab:CreateDisplayItemFromRaw(recommendation.result.item_string)
+	local item = self.itemsTab.displayItem
+	self.itemsTab:AddDisplayItem(true)
+	local slot = row and row.slot
+	if slot and slot:IsShown() and self.itemsTab:IsItemValidForSlot(item, slot.slotName) then
+		slot:SetSelItemId(item.id)
+		self.itemsTab:PopulateSlots()
+		self.itemsTab:AddUndoState()
+		self.itemsTab.build.buildFlag = true
+	end
+end
+
+function TradeQueryClass:OpenResultSearch(lastQuery, itemResult, noticeControl)
+	if not lastQuery or not itemResult then
+		return
+	end
+	local function openPrefillFallback()
+		local query = self:BuildWeightBandQuery(lastQuery, itemResult.weight, nil)
+		local url = self:BuildPrefillSearchUrl(query)
+		Copy(url)
+		OpenURL(url)
+	end
+
+	if main.api.authToken then
+		if noticeControl then
+			self:SetNotice(noticeControl, "Creating trade search...")
+		end
+		local exactQueryStr = self:BuildWeightBandQuery(lastQuery, itemResult.weight, itemResult.trader)
+		self.tradeQueryRequests:PerformSearch(self.pbRealm, self.pbLeague, exactQueryStr, function(response, errMsg)
+			if errMsg or not (response and response.id) then
+				if noticeControl then
+					self:SetNotice(noticeControl, "")
+				end
+				openPrefillFallback()
+				return
+			end
+			if noticeControl then
+				self:SetNotice(noticeControl, "")
+			end
+			local url = self.tradeQueryRequests:buildUrl(self.hostName .. "trade2/search", self.pbRealm, self.pbLeague, response.id)
+			Copy(url)
+			OpenURL(url)
+		end)
+	else
+		openPrefillFallback()
+	end
+end
+
+function TradeQueryClass:OpenUpgradeRecommendationPopup(state)
+	local controls = state.controls
+	local rowHeight = 20
+	local popupWidth = 980
+	local popupHeight = 680
+	state.contentHeight = (#state.rows + 2) * rowHeight
+	state.viewportHeight = popupHeight - 115
+	controls.progress = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {16, 16, popupWidth - 32, 16}, function()
+		return state.progressLabel or "Preparing upgrade scan..."
+	end)
+	controls.notice = new("LabelControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {16, -34, 560, 16}, "")
+	controls.sectionAnchor = new("LabelControl", {"TOPLEFT", nil, "TOPLEFT"}, {16, 48, 0, 0}, "")
+	for index, row in ipairs(state.rows) do
+		controls["slotStatus"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, (index - 1) * rowHeight, 910, 16}, function()
+			return s_format("%s: %s", row.label or row.slotName, row.status or "Queued")
+		end)
+	end
+	controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -16, 90, 20}, function()
+		return state.done and "Done" or "Cancel"
+	end, function()
+		state.cancelled = true
+		self:RestoreUpgradeRecommendationBehaviours(state)
+		if self.upgradeRecommender == state then
+			self.upgradeRecommender = nil
+		end
+		main:ClosePopup()
+	end)
+	controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-22, 48, 18, 0}, 50, "VERTICAL", false)
+	controls.scrollBar.shown = function()
+		return state.contentHeight > state.viewportHeight
+	end
+	local function scrollBarFunc()
+		controls.scrollBar.height = state.viewportHeight
+		controls.scrollBar:SetContentDimension(state.viewportHeight, state.contentHeight)
+		controls.sectionAnchor.y = -controls.scrollBar.offset
+	end
+	main:OpenPopup(popupWidth, popupHeight, "Upgrade Recommendations", controls, nil, nil, "close", scrollBarFunc)
+end
+
+function TradeQueryClass:RenderUpgradeRecommendationResults(state)
+	local controls = state.controls
+	local rowHeight = 24
+	local startY = (#state.rows + 1) * 20 + 10
+	controls.resultHeader = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, startY, 920, 16}, "^7Rank  Slot                  Current item                 Best candidate               Gain      Price             Seller")
+	for index, recommendation in ipairs(state.recommendations) do
+		local row = recommendation.row
+		local result = recommendation.result
+		local y = startY + index * rowHeight
+		controls["resultLabel"..index] = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, y + 2, 730, 16}, function()
+			return s_format("%d. %-20s %-28s %-28s +%.3f   %-16s %s",
+				index,
+				row.label or row.slotName,
+				row.currentItemName or "Current",
+				getRecommendationItemName(recommendation.item),
+				recommendation.gain,
+				formatRecommendationPrice(result),
+				result.trader or "")
+		end)
+		controls["resultImport"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {738, y, 78, 20}, "Import", function()
+			self:ImportUpgradeRecommendation(recommendation)
+		end)
+		controls["resultImport"..index].tooltipFunc = function(tooltip)
+			tooltip:Clear()
+			local item = new("Item", result.item_string)
+			self.itemsTab:AddItemTooltip(tooltip, item, row.slot, true)
+		end
+		controls["resultSearch"..index] = new("ButtonControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {824, y, 78, 20}, "Search", function()
+			self:OpenResultSearch(recommendation.query, result, controls.notice)
+		end)
+		controls["resultSearch"..index].tooltipText = "Opens and copies a trade search narrowed to this item."
+	end
+	state.contentHeight = startY + (#state.recommendations + 2) * rowHeight
+	if #state.recommendations == 0 then
+		controls.noResults = new("LabelControl", {"TOPLEFT", controls.sectionAnchor, "TOPLEFT"}, {0, startY + rowHeight, 920, 16}, "^7No positive market-backed upgrades were found in the fetched results.")
+	end
+end
+
+function TradeQueryClass:RunNextUpgradeRecommendationSlot(state)
+	if self.upgradeRecommender ~= state or state.cancelled then
+		return
+	end
+	state.index = state.index + 1
+	if state.index > #state.rows then
+		self:SortUpgradeRecommendations(state.recommendations)
+		state.progressLabel = s_format("Scan complete. Found %d upgrade%s across %d slot%s.",
+			#state.recommendations,
+			#state.recommendations == 1 and "" or "s",
+			#state.rows,
+			#state.rows == 1 and "" or "s")
+		state.done = true
+		self:RestoreUpgradeRecommendationBehaviours(state)
+		self:RenderUpgradeRecommendationResults(state)
+		return
+	end
+
+	local row = state.rows[state.index]
+	row.status = "Generating weighted search..."
+	state.progressLabel = s_format("Scanning %d/%d: %s", state.index, #state.rows, row.label or row.slotName)
+	local options = self:GetRecommendationQueryOptions(row)
+	self.tradeQueryGenerator.tradeTypeIndex = self.tradeTypeIndex or 1
+	self.tradeQueryGenerator:RequestQuery(row.slot, { slotTbl = row.slotTbl, autoExecute = true, options = options }, state.statWeights, function(context, query, errMsg)
+		if self.upgradeRecommender ~= state or state.cancelled then
+			return
+		end
+		if errMsg then
+			row.status = colorCodes.WARNING .. errMsg
+			self:RunNextUpgradeRecommendationSlot(state)
+			return
+		end
+		row.query = query
+		row.status = "Searching trade..."
+		self.tradeQueryRequests:SearchWithQueryWeightAdjusted(self.pbRealm, self.pbLeague, query, function(items, searchErrMsg)
+			if self.upgradeRecommender ~= state or state.cancelled then
+				return
+			end
+			if searchErrMsg then
+				row.status = colorCodes.WARNING .. searchErrMsg
+			else
+				local itemsSafe = self:SanitizeFetchedItemsForRecommendation(items, row.slotTbl)
+				local best = self:GetBestUpgradeRecommendationForSlot(row, itemsSafe, state.calcFunc, state.baseOutput, state.statWeights)
+				if best then
+					best.query = query
+					t_insert(state.recommendations, best)
+					row.status = s_format("Best +%.3f: %s for %s", best.gain, getRecommendationItemName(best.item), formatRecommendationPrice(best.result))
+				else
+					row.status = "No positive upgrade in fetched results."
+				end
+			end
+			self:RunNextUpgradeRecommendationSlot(state)
+		end)
+	end)
+end
+
+function TradeQueryClass:RecommendUpgrades()
+	if not main.api.authToken then
+		local controls = { }
+		controls.label = new("LabelControl", nil, {0, 20, 0, 16}, colorCodes.WARNING.."Log in with Path of Exile before running upgrade recommendations.")
+		controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -10, 80, 20}, "Close", function()
+			main:ClosePopup()
+		end)
+		main:OpenPopup(460, 90, "Upgrade Recommendations", controls)
+		return
+	end
+
+	self.pbRealm = self.pbRealm ~= "" and self.pbRealm or "poe2"
+	self.pbLeague = self.pbLeague or self.itemsTab.leagueDropList[self.pbLeagueIndex] or "Standard"
+	self.tradeQueryRequests.maxFetchPerSearch = 10 * (self.maxFetchPages or self.maxFetchPerSearchDefault)
+	local statWeights = self:EnsureTradeSearchWeights()
+	local rows = self:BuildUpgradeRecommendationSlotRows()
+	if #rows == 0 then
+		local controls = { }
+		controls.label = new("LabelControl", nil, {0, 20, 0, 16}, "^7No equipped, supported item slots are available to scan.")
+		controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -10, 80, 20}, "Close", function()
+			main:ClosePopup()
+		end)
+		main:OpenPopup(420, 90, "Upgrade Recommendations", controls)
+		return
+	end
+
+	local generator = self:EnsureTradeSearchServices()
+	local calcFunc, baseOutput = self.itemsTab.build.calcsTab:GetMiscCalculator()
+	local state = {
+		rows = rows,
+		index = 0,
+		recommendations = { },
+		statWeights = statWeights,
+		calcFunc = calcFunc,
+		baseOutput = baseOutput,
+		controls = { },
+		previousAugmentBehaviour = generator.lastAugmentBehaviour,
+		previousAnointBehaviour = generator.lastAnointBehaviour,
+	}
+	self.upgradeRecommender = state
+	self:OpenUpgradeRecommendationPopup(state)
+	self:RunNextUpgradeRecommendationSlot(state)
 end
 
 -- Opens the item pricing popup
@@ -1023,41 +1499,7 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 						self:SetNotice(context.controls.pbNotice, "")
 					end
 
-					-- ensure we only take in items that parse properly to avoid crash issues.
-					local itemsSafe = {}
-					for _, entry in ipairs(items) do
-						local item = new("Item", entry.item_string)
-						if item.base then
-							t_insert(itemsSafe, entry)
-						end
-					end
-
-					if self.tradeQueryGenerator.lastAugmentBehaviour == "Copy Current" or self.tradeQueryGenerator.lastAnointBehaviour == "Copy Current" then
-						for i, _ in ipairs(itemsSafe) do
-							local item = new("Item", itemsSafe[i].item_string)
-							-- avoid interacting with badly parsed stuff
-							if item.base and item.type then
-								self.itemsTab:CopyAnointsAndAugments(item, true, true, context.slotTbl.slotName)
-								itemsSafe[i].item_string = item:BuildRaw()
-							end
-						end
-					elseif self.tradeQueryGenerator.lastAugmentBehaviour == "Remove" then
-						for item_idx, _ in ipairs(itemsSafe) do
-							local item = new("Item", itemsSafe[item_idx].item_string)
-							-- sockets are kept as-is so the user can see e.g. exceptional or corrupted sockets
-							for rune_idx, _ in ipairs(item.runes or {}) do
-								item.runes[rune_idx] = "None"
-							end
-							item:UpdateRunes()
-							itemsSafe[item_idx].item_string = item:BuildRaw()
-						end
-					elseif self.tradeQueryGenerator.lastAnointBehaviour == "Remove" then
-						for i, _ in ipairs(itemsSafe) do
-							local item = new("Item", itemsSafe[i].item_string)
-							item.enchantModLines = {}
-							itemsSafe[i].item_string = item:BuildRaw()
-						end
-					end
+					local itemsSafe = self:SanitizeFetchedItemsForRecommendation(items, context.slotTbl)
 
 					self.resultTbl[context.row_idx] = itemsSafe
 					self:UpdateControlsWithItems(context.row_idx)
@@ -1227,41 +1669,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 			if  itemResult.whisper and (itemResult.priceType ~= "~b/o") then
 				Copy(itemResult.whisper)
 			else
-				-- Fallback: open a prefill (?q=) search without the account filter.
-				-- Account names contain a '#', and a logged-out browser forwards the
-				-- whole prefill URL to pathofexile.com's OAuth endpoint, which
-				-- rejects the '#' as a URL fragment. Dropping the account keeps the
-				-- URL '#'-free (less precise: relies on the weight band only).
-				local function openPrefillFallback()
-					local query = self:BuildWeightBandQuery(self.lastQueries[row_idx], itemResult.weight, nil)
-					local url = self:BuildPrefillSearchUrl(query)
-					Copy(url)
-					OpenURL(url)
-				end
-
-				if main.api.authToken then
-					-- We hold a trade API token, so create a server-side search and
-					-- open the short trade2/search/<league>/<id> URL. It carries no
-					-- '#'/query string, so a logged-out browser completes the normal
-					-- OAuth login instead of erroring. The account filter is kept
-					-- here because it lives in the POST body, never in a URL.
-					self:SetNotice(self.controls.pbNotice, "Creating trade search...")
-					local exactQueryStr = self:BuildWeightBandQuery(self.lastQueries[row_idx], itemResult.weight, itemResult.trader)
-					self.tradeQueryRequests:PerformSearch(self.pbRealm, self.pbLeague, exactQueryStr, function(response, errMsg)
-						if errMsg or not (response and response.id) then
-							-- token expired, item already sold, etc. -> degrade gracefully
-							self:SetNotice(self.controls.pbNotice, "")
-							openPrefillFallback()
-							return
-						end
-						self:SetNotice(self.controls.pbNotice, "")
-						local url = self.tradeQueryRequests:buildUrl(self.hostName .. "trade2/search", self.pbRealm, self.pbLeague, response.id)
-						Copy(url)
-						OpenURL(url)
-					end)
-				else
-					openPrefillFallback()
-				end
+				self:OpenResultSearch(self.lastQueries[row_idx], itemResult, self.controls.pbNotice)
 			end
 		end)
 
