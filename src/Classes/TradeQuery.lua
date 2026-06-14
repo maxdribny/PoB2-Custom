@@ -420,13 +420,16 @@ function TradeQueryClass:GetRecommendationQueryOptions(row)
 		includeMirrored = self.tradeQueryGenerator.lastIncludeMirrored == nil or self.tradeQueryGenerator.lastIncludeMirrored == true,
 		silent = true,
 	}
-	if slotName:find("Jewel") then
+	local isJewelSlot = slotName:find("Jewel") ~= nil
+	if isJewelSlot then
 		options.jewelType = row.currentItem and row.currentItem.base and row.currentItem.base.subType == "Radius" and "Radius" or "Base"
 	end
 
-	local isAugmentableSlot = slotName:find("Weapon 1") or slotName:find("Weapon 2") or slotName:find("Helmet")
-		or slotName:find("Body Armour") or slotName:find("Gloves") or slotName:find("Boots")
-	local isAmulet = slotName:find("Amulet") ~= nil
+	-- jewel sockets live on a parent slot (e.g. "Body Armour Jewel Socket 1") whose name
+	-- matches the augmentable-gear checks below; exclude them so jewels aren't treated as runed gear
+	local isAugmentableSlot = not isJewelSlot and (slotName:find("Weapon 1") or slotName:find("Weapon 2") or slotName:find("Helmet")
+		or slotName:find("Body Armour") or slotName:find("Gloves") or slotName:find("Boots"))
+	local isAmulet = not isJewelSlot and slotName:find("Amulet") ~= nil
 	self.tradeQueryGenerator.lastAugmentBehaviour = isAugmentableSlot and (self.tradeQueryGenerator.lastAugmentBehaviour or "Copy Current") or nil
 	self.tradeQueryGenerator.lastAnointBehaviour = isAmulet and (self.tradeQueryGenerator.lastAnointBehaviour or "Copy Current") or nil
 	options.includeRunes = self.tradeQueryGenerator.lastAugmentBehaviour == "Keep"
